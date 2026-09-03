@@ -2,6 +2,13 @@
 
 A high-performance, asset-caching image pipeline designed for **[Vite](https://vite.dev/)**-based projects (**[Astro](https://astro.build/)**, **[React](https://react.dev/)**, **[Svelte](https://svelte.dev/)**, **[Vue](https://vuejs.org/)**, **[Solid](https://www.solidjs.com/)**, and more). It extracts rich metadata, generates local ML-driven vector embeddings, computes low-resolution blur placeholders, samples dominant colors, and handles zero-egress remote platform uploads during production builds.
 
+Root entry point works without Astro. Import Astro lifecycle support separately:
+
+```ts
+import { getImageColors } from "vite-image-pipeline";
+import { astroImagePipelinePlugin } from "vite-image-pipeline/astro";
+```
+
 While `vite-image-pipeline` is completely framework-agnostic and can be utilized in any Vite context, it also includes a dedicated integration for **[Astro](https://astro.build/)** to automatically coordinate cleanup and remote synchronization on production builds.
 
 ## Why Use This?
@@ -110,6 +117,10 @@ setOptions({
 
 ```
 
+Call `flushImagePipelineCaches()` before a short-lived script exits. Astro
+integration flushes pending writes automatically. Cache writes are atomic, so an
+interrupted process cannot replace valid JSON with partial JSON.
+
 ## Full API Reference & Examples
 
 ### 1. Metadata Extraction
@@ -179,12 +190,15 @@ const remoteOptions = {
   r2AccessKey: process.env.R2_ACCESS_KEY,
   r2SecretKey: process.env.R2_SECRET_KEY,
   bucketName: 'my-gallery-cdn',
-  outDir: 'dist' // Local output distribution path to read from and prune
+  outDir: 'dist', // Local output distribution path to read from and prune
+  // Browser-facing origin. Uploads still use account R2 API endpoint.
+  bucketDomain: 'download.example.com',
+  cacheControl: 'public, max-age=31536000, immutable'
 };
 
 const transformedUrls = await uploadRemoteImages(remoteOptions, ['src/assets/photo1.jpg']);
 // Dev output:  ['src/assets/photo1.jpg']
-// Prod output: ['https://my-gallery-cdn.r2.cloudflarestorage.com/src/assets/photo1.jpg']
+// Prod output: ['https://download.example.com/src/assets/photo1.jpg']
 
 ```
 
@@ -197,7 +211,7 @@ Add the integration manager hook to your `astro.config.mjs` setup to coordinate 
 ```javascript
 // astro.config.mjs
 import { defineConfig } from 'astro/config';
-import { astroImagePipelinePlugin } from 'vite-image-pipeline';
+import { astroImagePipelinePlugin } from 'vite-image-pipeline/astro';
 
 export default defineConfig({
   integrations: [
