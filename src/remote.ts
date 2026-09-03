@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { HeadObjectCommand, S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { existsSync } from "fs";
 import path from "path";
 import fs from "fs/promises";
@@ -113,19 +113,38 @@ export function createRemotePlatform(options: RemoteImageOptions): RemotePlatfor
 
                                 console.log(`[vite-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
                                 try {
-                                    await s3Client.send(
+                                    const response = await s3Client.send(
                                         new PutObjectCommand({
                                             Bucket: options.bucketName,
                                             Key: relativeObjectPath,
                                             Body: fileBuffer,
                                             ContentType: getMimeType(ext),
                                             CacheControl: options.cacheControl,
-                                            IfNoneMatch: localETag
+                                            // R2 objects served with `immutable` cache headers must never
+                                            // be replaced. If this key already exists, compare its content
+                                            // hash below instead of overwriting it.
+                                            IfNoneMatch: "*",
                                         })
                                     );
+                                    if (response.ETag !== localETag) {
+                                        throw new Error(
+                                            `[vite-image-pipeline] R2 returned an unexpected ETag for ${relativeObjectPath}: expected ${localETag}, received ${response.ETag || "none"}`,
+                                        );
+                                    }
                                 } catch (uploadErr: any) {
-                                    // Cloudflare returns 412 when object ETag matches this file.
+                                    // An existing object is only safe when it has exactly the same bytes.
                                     if (uploadErr.name === "PreconditionFailed" || uploadErr.$metadata?.httpStatusCode === 412) {
+                                        const existing = await s3Client.send(
+                                            new HeadObjectCommand({
+                                                Bucket: options.bucketName,
+                                                Key: relativeObjectPath,
+                                            }),
+                                        );
+                                        if (existing.ETag !== localETag) {
+                                            throw new Error(
+                                                `[vite-image-pipeline] Immutable R2 key collision for ${relativeObjectPath}: expected ${localETag}, found ${existing.ETag || "none"}. Generate a new asset filename instead of replacing this object.`,
+                                            );
+                                        }
                                         console.log(`[vite-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
                                     } else {
                                         throw uploadErr;
