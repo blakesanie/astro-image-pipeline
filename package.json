@@ -1,6 +1,6 @@
 {
   "name": "vite-image-pipeline",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Framework-agnostic image processing pipeline building blocks for Vite",
   "type": "module",
   "main": "./dist/index.js",
