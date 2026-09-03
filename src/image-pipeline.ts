@@ -1,16 +1,14 @@
 // image-pipeline.ts
 /// <reference types="vite/client" />
 
-import crypto from "crypto";
 import { exiftool, type Tags } from "exiftool-vendored";
 import { pipeline, env, RawImage } from "@huggingface/transformers";
 import fs from "fs/promises";
-import { existsSync } from "fs";
 import path from "path";
 import sharp from "sharp";
 import type { AstroIntegration } from "astro";
 import { loadCache, saveCache, getFileStatsAndHash, resolveToAbsolutePath } from "./utils.js";
-import { RemoteImageOptions, RemotePlatform, remotePlatformId } from "./remote.js";
+import { type RemoteImageOptions, type RemotePlatform, createRemotePlatform, remotePlatformId } from "./remote.js";
 
 interface CacheEntry<T> {
   mtime: number;
@@ -44,6 +42,28 @@ export function setOptions(newOptions: ImagePipelineOptions) {
     ...options,
     ...newOptions
   }
+}
+
+const dirtyCaches = new Map<string, Record<string, unknown>>();
+let cacheFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+function markCacheDirty(cachePath: string, cache: Record<string, unknown> | null) {
+  if (!cache) return;
+  dirtyCaches.set(cachePath, cache);
+  if (!cacheFlushTimer) {
+    cacheFlushTimer = setTimeout(() => {
+      void flushImagePipelineCaches();
+    }, 1_000);
+    cacheFlushTimer.unref?.();
+  }
+}
+
+export async function flushImagePipelineCaches() {
+  if (cacheFlushTimer) clearTimeout(cacheFlushTimer);
+  cacheFlushTimer = undefined;
+  const pendingCaches = [...dirtyCaches.entries()];
+  dirtyCaches.clear();
+  await Promise.all(pendingCaches.map(([cachePath, cache]) => saveCache(cachePath, cache)));
 }
 
 // metadata
@@ -127,7 +147,7 @@ export async function getMetadata(
       }),
     );
 
-    await saveCache(options.metadataCachePath, globalThis.metadataCache);
+    markCacheDirty(options.metadataCachePath, globalThis.metadataCache);
     return results;
   })();
 
@@ -265,7 +285,7 @@ export async function getEmbeddings(
       }
     }
 
-    await saveCache(options.embeddingCachePath, globalThis.embeddingCache);
+    markCacheDirty(options.embeddingCachePath, globalThis.embeddingCache);
     return results;
   })();
 
@@ -390,7 +410,7 @@ export async function getImageBlurPlaceholders(
       }),
     );
 
-    await saveCache(options.blurCachePath, globalThis.blurCache);
+    markCacheDirty(options.blurCachePath, globalThis.blurCache);
     return results;
   })();
 
@@ -472,7 +492,7 @@ export async function getImageColors(
         }
       }),
     );
-    await saveCache(options.colorCachePath, globalThis.colorCache);
+    markCacheDirty(options.colorCachePath, globalThis.colorCache);
     return results;
   })();
 
@@ -515,7 +535,7 @@ export async function uploadRemoteImages(
     console.log("[vite-image-pipeline] remote platform id", id);
     let platform = globalThis.remotePlatforms.get(id);
     if (!platform) {
-      platform = RemotePlatform(remoteOptions);
+      platform = createRemotePlatform(remoteOptions);
       platform.validate();
       globalThis.remotePlatforms.set(id, platform);
     }
@@ -566,7 +586,10 @@ export function astroImagePipelinePlugin(): AstroIntegration {
   return {
     name: "image-pipeline",
     hooks: {
-      "astro:build:generated": stop,
+      "astro:build:generated": async () => {
+        await flushImagePipelineCaches();
+        await stop();
+      },
       "astro:build:done": processRemoteUploads,
     },
   };

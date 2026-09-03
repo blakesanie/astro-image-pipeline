@@ -4,7 +4,6 @@ import fs from "fs/promises";
 import { existsSync } from "fs";
 
 export function resolveToAbsolutePath(filePath: string): string {
-    console.log("filepath", filePath)
     let cleanPath = filePath.split("?")[0];
     if (cleanPath.startsWith("/_astro/")) {
         return path.resolve(path.join(process.cwd(), "dist", cleanPath));
@@ -65,15 +64,17 @@ export async function loadCache<T>(filepath: string): Promise<Record<string, T>>
     return {};
 }
 
-export async function saveCache(filepath: string, cache: Record<string, any> | null) {
+export async function saveCache(filepath: string, cache: Record<string, unknown> | null) {
     if (!cache) return;
     try {
         await fs.mkdir(path.dirname(filepath), { recursive: true });
+        const temporaryPath = `${filepath}.${process.pid}.${Date.now()}.tmp`;
         await fs.writeFile(
-            filepath,
+            temporaryPath,
             JSON.stringify(cache, null, 2),
             "utf-8",
         );
+        await fs.rename(temporaryPath, filepath);
     } catch (err) {
         console.error(
             "[vite-image-pipeline] Failed to sync cache:",

@@ -13,7 +13,9 @@ interface CloudflareR2Options {
     r2SecretKey: string;
     accountId: string;
     bucketName: string;
+    bucketDomain?: string;
     outDir: string;
+    cacheControl?: string;
 }
 
 export type RemoteImageOptions = CloudflareR2Options // Extendable union: CloudflareR2Options | AWSS3Options | etc.
@@ -22,7 +24,7 @@ export interface RemotePlatform {
     type: RemotePlatformType;
     generateRemoteUrl: (filepath: string) => string;
     validate: () => void;
-    upload: () => void;
+    upload: () => Promise<void>;
     filepaths: Set<string>;
 }
 
@@ -35,7 +37,15 @@ export function remotePlatformId(options: RemoteImageOptions): string {
     }
 }
 
-export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
+function publicUrlOrigin(bucketDomain: string): string {
+    const url = new URL(bucketDomain.includes("://") ? bucketDomain : `https://${bucketDomain}`);
+    if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash) {
+        throw new Error("[vite-image-pipeline] bucketDomain must be an HTTPS hostname without a path");
+    }
+    return url.origin;
+}
+
+export function createRemotePlatform(options: RemoteImageOptions): RemotePlatform {
     // Switch on the literal property value
     switch (options.platform) {
         case "cloudflare-r2":
@@ -44,7 +54,9 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                 type: "cloudflare-r2",
                 generateRemoteUrl: (filepath: string) => {
                     const relativeObjectPath = filepath.startsWith("/") ? filepath.slice(1) : filepath;
-                    return `https://${options.bucketName}.r2.cloudflarestorage.com/${relativeObjectPath}`;
+                    return options.bucketDomain
+                        ? `${publicUrlOrigin(options.bucketDomain)}/${relativeObjectPath}`
+                        : `https://${options.bucketName}.r2.cloudflarestorage.com/${relativeObjectPath}`;
                 },
                 filepaths: filepathsSet,
                 validate: () => {
@@ -53,6 +65,7 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                     if (!options.accountId) throw Error("[vite-image-pipeline] Cloudflare R2 account ID is required");
                     if (!options.bucketName) throw Error("[vite-image-pipeline] Cloudflare R2 bucket name is required");
                     if (!options.outDir) throw Error("[vite-image-pipeline] Out directory is required (ex. 'dist')");
+                    if (options.bucketDomain) publicUrlOrigin(options.bucketDomain);
                 },
                 upload: async () => {
                     const filepaths = Array.from(filepathsSet);
@@ -83,51 +96,52 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                         const batch = filepaths.slice(i, i + BATCH_SIZE);
 
                         // Fire off all uploads in the current batch concurrently
-                        await Promise.all(
+                        const results = await Promise.allSettled(
                             batch.map(async (rawPath) => {
                                 const relativeObjectPath = rawPath.startsWith("/") ? rawPath.slice(1) : rawPath;
                                 const targetDistLocation = path.join(options.outDir, relativeObjectPath);
 
                                 if (!existsSync(targetDistLocation)) {
-                                    console.warn(`[vite-image-pipeline] Local build file missing for upload: ${targetDistLocation}`);
-                                    return;
+                                    throw new Error(`[vite-image-pipeline] Local build file missing for upload: ${targetDistLocation}`);
                                 }
 
+                                const fileBuffer = await fs.readFile(targetDistLocation);
+                                const ext = path.extname(targetDistLocation).toLowerCase();
+
+                                const localMD5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
+                                const localETag = `"${localMD5}"`;
+
+                                console.log(`[vite-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
                                 try {
-                                    const fileBuffer = await fs.readFile(targetDistLocation);
-                                    const ext = path.extname(targetDistLocation).toLowerCase();
-
-                                    const localMD5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
-                                    const localETag = `"${localMD5}"`;
-
-                                    console.log(`[vite-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
-                                    try {
-                                        await s3Client.send(
-                                            new PutObjectCommand({
-                                                Bucket: options.bucketName,
-                                                Key: relativeObjectPath,
-                                                Body: fileBuffer,
-                                                ContentType: getMimeType(ext),
-                                                IfNoneMatch: localETag
-                                            })
-                                        );
-                                    } catch (uploadErr: any) {
-                                        // 3. If Cloudflare detects the hashes match, it throws a PreconditionFailed error
-                                        if (uploadErr.name === "PreconditionFailed" || uploadErr.$metadata?.httpStatusCode === 412) {
-                                            console.log(`[vite-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
-                                        } else {
-                                            // Throw actual network/credential errors upward
-                                            throw uploadErr;
-                                        }
+                                    await s3Client.send(
+                                        new PutObjectCommand({
+                                            Bucket: options.bucketName,
+                                            Key: relativeObjectPath,
+                                            Body: fileBuffer,
+                                            ContentType: getMimeType(ext),
+                                            CacheControl: options.cacheControl,
+                                            IfNoneMatch: localETag
+                                        })
+                                    );
+                                } catch (uploadErr: any) {
+                                    // Cloudflare returns 412 when object ETag matches this file.
+                                    if (uploadErr.name === "PreconditionFailed" || uploadErr.$metadata?.httpStatusCode === 412) {
+                                        console.log(`[vite-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
+                                    } else {
+                                        throw uploadErr;
                                     }
-
-                                    // Purge local file upon successful upload
-                                    await fs.unlink(targetDistLocation);
-                                } catch (err) {
-                                    console.error(`[vite-image-pipeline] Failed uploading asset "${relativeObjectPath}":`, err);
                                 }
+
+                                // Purge local file only after upload or matching ETag.
+                                await fs.unlink(targetDistLocation);
                             })
                         );
+                        const failures = results
+                            .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+                            .map((result) => result.reason);
+                        if (failures.length > 0) {
+                            throw new AggregateError(failures, "[vite-image-pipeline] One or more R2 uploads failed");
+                        }
                     }
                 }
             };

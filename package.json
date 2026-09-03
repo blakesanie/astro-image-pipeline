@@ -3,8 +3,22 @@
   "version": "1.0.2",
   "description": "Framework-agnostic image processing pipeline building blocks for Vite",
   "type": "module",
-  "main": "./dist/image-pipeline.js",
-  "types": "./dist/image-pipeline.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./astro": {
+      "types": "./dist/astro.d.ts",
+      "default": "./dist/astro.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "default": "./dist/remote.js"
+    }
+  },
   "author": {
     "name": "Blake Sanie",
     "url": "https://blakesanie.com"
@@ -23,7 +37,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "vitest"
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",
