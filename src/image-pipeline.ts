@@ -557,6 +557,7 @@ async function processRemoteUploads() {
   const currentLock = uploadLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
+    const failures: unknown[] = [];
     for (const [id, platform] of globalThis.remotePlatforms.entries()) {
       try {
         console.log(`[vite-image-pipeline] Uploading remote images for platform ${id}`);
@@ -564,8 +565,12 @@ async function processRemoteUploads() {
         console.log(`[vite-image-pipeline] Uploaded remote images for platform ${id}`);
       } catch (e) {
         console.error(`[vite-image-pipeline] Failed to upload remote images for platform ${id}:`, e);
+        failures.push(e);
       }
       globalThis.remotePlatforms.delete(id);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "[vite-image-pipeline] One or more remote image platforms failed");
     }
   })();
   uploadLock = executionPromise;
